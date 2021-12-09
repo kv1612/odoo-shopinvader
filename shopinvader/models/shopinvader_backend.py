@@ -3,12 +3,14 @@
 # Copyright 2020 Camptocamp (http://www.camptocamp.com).
 # @author Simone Orsi <simahawk@gmail.com>
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
+
 import hashlib
 import os
 from collections import defaultdict
 from contextlib import contextmanager
 
 from odoo import _, api, fields, models, tools
+from odoo.osv import expression
 
 from odoo.addons.base_sparse_field.models.fields import Serialized
 
@@ -41,6 +43,8 @@ class ShopinvaderBackend(models.Model):
     )
     nbr_variant = fields.Integer(compute="_compute_nbr_content")
     nbr_category = fields.Integer(compute="_compute_nbr_content")
+    nbr_cart = fields.Integer(compute="_compute_nbr_sale_order")
+    nbr_sale = fields.Integer(compute="_compute_nbr_sale_order")
     allowed_country_ids = fields.Many2many(
         comodel_name="res.country", string="Allowed Country"
     )
@@ -142,15 +146,24 @@ class ShopinvaderBackend(models.Model):
         string="Available partner industries",
         default=lambda self: self._default_partner_industry_ids(),
     )
-    # Invoice settings
-    invoice_settings = Serialized(
+    # Sale settings aggregator.
+    # Use this for `sparse` attribute of sale related settings
+    # that do not require a real field.
+    sale_settings = Serialized(
         # Default values on the sparse fields work only for create
         # and does not provide defaults for existing records.
+        default={}
+    )
+    # Invoice settings aggregator.
+    # Use this for `sparse` attribute of invoice related settings
+    # that do not require a real field.
+    invoice_settings = Serialized(
         default={
             "invoice_linked_to_sale_only": True,
             "invoice_access_open": False,
         }
     )
+    # TODO: move to portal mode?
     invoice_linked_to_sale_only = fields.Boolean(
         default=True,
         string="Only sale invoices",
@@ -255,6 +268,7 @@ class ShopinvaderBackend(models.Model):
             )
         ]
 
+    @api.model
     def _to_compute_nbr_content(self):
         """
         Get a dict to compute the number of content.
@@ -283,6 +297,31 @@ class ShopinvaderBackend(models.Model):
                 result = {data["backend_id"][0]: data["__count"] for data in result}
                 for record in self:
                     record[odoo_field] = result.get(record.id, 0)
+
+    @api.model
+    def _to_compute_nbr_sale_order(self):
+        """Get a dict to compute the number of sale order.
+
+        The dict is build like this:
+            {field_name: domain}
+        """
+        return {
+            "nbr_cart": [("typology", "=", "cart")],
+            "nbr_sale": [("typology", "=", "sale")],
+        }
+
+    def _compute_nbr_sale_order(self):
+        domain = [("shopinvader_backend_id", "in", self.ids)]
+        for fname, fdomain in self._to_compute_nbr_sale_order().items():
+            res = self.env["sale.order"].read_group(
+                domain=expression.AND([domain, fdomain]),
+                fields=["shopinvader_backend_id"],
+                groupby=["shopinvader_backend_id"],
+                lazy=False,
+            )
+            counts = {r["shopinvader_backend_id"][0]: r["__count"] for r in res}
+            for rec in self:
+                rec[fname] = counts.get(rec.id, 0)
 
     def _bind_all_content(self, model, bind_model, domain):
         bind_model_obj = self.env[bind_model].with_context(active_test=False)
